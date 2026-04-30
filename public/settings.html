@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>FramePost — Settings</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <nav class="nav">
+    <span class="brand">FramePost</span>
+    <a href="/queue">Queue</a>
+    <a href="/new">New</a>
+    <a href="/settings" class="active">Settings</a>
+  </nav>
+
+  <div class="container">
+    <h1>Settings</h1>
+
+    <div class="card">
+      <h2>Auto-fill</h2>
+      <label>Posts to draft per run</label>
+      <input type="number" id="autofill_per_day" min="1" max="10" />
+      <label>Auto-fill schedule (cron expression)</label>
+      <input type="text" id="autofill_cron" placeholder="0 8 * * *" />
+      <p class="muted">e.g. <code>0 8 * * *</code> = every day at 8am</p>
+    </div>
+
+    <div class="card">
+      <h2>Publishing</h2>
+      <label>Publishing schedule (cron expression)</label>
+      <input type="text" id="publish_cron" placeholder="0 10 * * 2,4" />
+      <p class="muted">e.g. <code>0 10 * * 2,4</code> = Tuesdays &amp; Thursdays at 10am</p>
+    </div>
+
+    <div class="btn-row">
+      <button onclick="save()">Save settings</button>
+    </div>
+
+    <div class="card">
+      <h2>Hashtag sets</h2>
+      <div id="sets"></div>
+      <label>New set name</label>
+      <input type="text" id="new-name" placeholder="e.g. Black & White" />
+      <label>Tags</label>
+      <input type="text" id="new-tags" placeholder="#bnw #blackandwhite #monochrome" />
+      <label><input type="checkbox" id="new-default" /> Enabled by default</label>
+      <div class="btn-row"><button onclick="addSet()">Add set</button></div>
+    </div>
+
+    <div class="card">
+      <h2>Manual triggers</h2>
+      <div class="btn-row">
+        <button class="btn-secondary" onclick="run('autofill')">Run auto-fill now</button>
+        <button class="btn-secondary" onclick="run('publish')">Run publish now</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    async function load() {
+      const s = await fetch('/api/settings').then(r => r.json());
+      document.getElementById('autofill_per_day').value = s.autofill_per_day || '1';
+      document.getElementById('autofill_cron').value = s.autofill_cron || '0 8 * * *';
+      document.getElementById('publish_cron').value = s.publish_cron || '0 10 * * 2,4';
+      loadSets();
+    }
+
+    async function loadSets() {
+      const sets = await fetch('/api/hashtag-sets').then(r => r.json());
+      document.getElementById('sets').innerHTML = sets.map(s =>
+        `<div style="margin-bottom:8px;padding:8px;border:1px solid var(--border);border-radius:8px;">
+          <strong>${s.name}</strong> ${s.enabled_by_default ? '<span class="status queued">default</span>' : ''}
+          <div class="muted">${s.tags}</div>
+          <div class="btn-row"><button class="btn-danger" onclick="delSet('${s.id}')">Delete</button></div>
+        </div>`
+      ).join('') || '<p class="muted">No sets yet.</p>';
+    }
+
+    async function save() {
+      await fetch('/api/settings', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          autofill_per_day: document.getElementById('autofill_per_day').value,
+          autofill_cron: document.getElementById('autofill_cron').value,
+          publish_cron: document.getElementById('publish_cron').value,
+        })
+      });
+      alert('Saved.');
+    }
+
+    async function addSet() {
+      const name = document.getElementById('new-name').value.trim();
+      const tags = document.getElementById('new-tags').value.trim();
+      const enabled_by_default = document.getElementById('new-default').checked;
+      if (!name || !tags) return alert('Name and tags required.');
+      await fetch('/api/hashtag-sets', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ name, tags, enabled_by_default })
+      });
+      document.getElementById('new-name').value = '';
+      document.getElementById('new-tags').value = '';
+      document.getElementById('new-default').checked = false;
+      loadSets();
+    }
+
+    async function delSet(id) {
+      if (!confirm('Delete this hashtag set?')) return;
+      await fetch('/api/hashtag-sets/' + id, { method: 'DELETE' });
+      loadSets();
+    }
+
+    async function run(which) {
+      await fetch('/api/run/' + which, { method: 'POST' });
+      alert(which + ' triggered.');
+    }
+
+    load();
+  </script>
+</body>
+</html>

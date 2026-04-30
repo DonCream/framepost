@@ -1,0 +1,31 @@
+# Secrets and credentials
+.env
+.env.local
+.env.*.local
+
+# Database (contains queue history, post log, settings)
+framepost.db
+framepost.db-wal
+framepost.db-shm
+*.db.old
+
+# Dependencies
+node_modules/
+
+# Logs
+*.log
+logs/
+.pm2/
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# Backup script's own log
+.backup.log

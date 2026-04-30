@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>FramePost — Queue</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <nav class="nav">
+    <span class="brand">FramePost</span>
+    <a href="/queue" class="active">Queue</a>
+    <a href="/new">New</a>
+    <a href="/settings">Settings</a>
+  </nav>
+
+  <div class="container">
+    <h1>Queue</h1>
+    <div id="list"></div>
+  </div>
+
+  <script>
+    let hashtagSets = [];
+
+    async function load() {
+      hashtagSets = await fetch('/api/hashtag-sets').then(r => r.json());
+      const queue = await fetch('/api/queue').then(r => r.json());
+      const list = document.getElementById('list');
+      if (queue.length === 0) {
+        list.innerHTML = '<div class="empty">Queue is empty.<br/>New posts will appear here once approved.</div>';
+        return;
+      }
+      list.innerHTML = queue.map(renderCard).join('');
+    }
+
+    function platformBadge(platform) {
+      const cls = platform === 'instagram' ? 'badge-ig' : 'badge-fb';
+      return `<span class="platform-badge ${cls}">${platform}</span>`;
+    }
+
+    function renderCard(item) {
+      const dt = new Date(item.scheduled_at).toISOString().slice(0, 16);
+      const sets = item.hashtag_sets || [];
+      const setsHtml = hashtagSets.map(s => {
+        const active = sets.includes(s.id) ? 'active' : '';
+        return `<span class="tag-pill ${active}" data-id="${s.id}" onclick="toggleSet('${item.id}', '${s.id}', this)">${s.name}</span>`;
+      }).join('');
+
+      return `
+        <div class="card" data-id="${item.id}">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            ${platformBadge(item.platform)}
+            <span class="status ${item.status}">${item.status}</span>
+          </div>
+          <img src="${item.url}" style="width:100%;border-radius:8px;display:block;margin-bottom:10px;" />
+          ${item.error ? `<div class="muted" style="color:#e08d8d;margin-bottom:8px;">${escapeHtml(item.error.slice(0, 120))}</div>` : ''}
+          <label>Caption</label>
+          <textarea onblur="updateField('${item.id}', 'caption', this.value)">${escapeHtml(item.caption)}</textarea>
+          <label>Scheduled</label>
+          <input type="datetime-local" value="${dt}" onchange="updateField('${item.id}', 'scheduled_at', new Date(this.value).toISOString())" />
+          <label>Hashtag Sets</label>
+          <div>${setsHtml}</div>
+          <div class="btn-row">
+            <button class="btn-success" onclick="publishNow('${item.id}')">Publish Now</button>
+            <button class="btn-danger" onclick="del('${item.id}')">Delete</button>
+          </div>
+        </div>
+      `;
+    }
+
+    async function updateField(id, field, value) {
+      await fetch('/api/queue/' + id, {
+        method: 'PATCH',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ [field]: value })
+      });
+    }
+
+    async function toggleSet(id, setId, el) {
+      const card = el.closest('.card');
+      const allPills = card.querySelectorAll('.tag-pill');
+      el.classList.toggle('active');
+      const active = Array.from(allPills).filter(p => p.classList.contains('active')).map(p => p.dataset.id);
+      await updateField(id, 'hashtag_sets', active);
+    }
+
+    async function del(id) {
+      if (!confirm('Delete this post from the queue?')) return;
+      await fetch('/api/queue/' + id, { method: 'DELETE' });
+      load();
+    }
+
+    async function publishNow(id) {
+      if (!confirm('Publish this post now?')) return;
+      await fetch('/api/queue/' + id + '/publish-now', { method: 'POST' });
+      setTimeout(load, 2000);
+    }
+
+    function escapeHtml(s) {
+      return String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    load();
+    setInterval(load, 30000);
+  </script>
+</body>
+</html>
