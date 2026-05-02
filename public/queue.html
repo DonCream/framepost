@@ -5,6 +5,97 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>FramePost — Queue</title>
   <link rel="stylesheet" href="/style.css" />
+  <style>
+    /* carousel stack + strip */
+    .thumb-wrap {
+      position: relative;
+      margin-bottom: 10px;
+    }
+    .thumb-wrap .cover {
+      width: 100%;
+      border-radius: 8px;
+      display: block;
+      position: relative;
+      z-index: 3;
+    }
+    .thumb-wrap.multi {
+      cursor: pointer;
+      /* leave space below for the stack peek */
+      margin-bottom: 16px;
+    }
+    .thumb-wrap.multi .cover {
+      box-shadow: 0 1px 0 rgba(255,255,255,0.04);
+    }
+    .thumb-wrap .stack-bg {
+      position: absolute;
+      inset: 0;
+      border-radius: 8px;
+      background: #1f1f1f;
+      border: 1px solid #333;
+    }
+    .thumb-wrap .stack-bg-1 { transform: translate(4px, 4px); z-index: 2; }
+    .thumb-wrap .stack-bg-2 { transform: translate(8px, 8px); z-index: 1; }
+    .thumb-wrap .count-badge {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      background: rgba(0,0,0,0.72);
+      color: #fff;
+      padding: 4px 9px;
+      border-radius: 12px;
+      font-size: 12px;
+      font-weight: 600;
+      z-index: 4;
+      pointer-events: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      backdrop-filter: blur(4px);
+    }
+    .thumb-wrap .chevron {
+      display: inline-block;
+      transition: transform 0.18s ease;
+    }
+    .thumb-wrap.expanded .chevron {
+      transform: rotate(180deg);
+    }
+    .carousel-strip {
+      display: none;
+      gap: 6px;
+      overflow-x: auto;
+      padding: 4px 0 10px;
+      margin-bottom: 6px;
+      -webkit-overflow-scrolling: touch;
+    }
+    .carousel-strip.open { display: flex; }
+    .carousel-strip .strip-item {
+      position: relative;
+      flex: 0 0 auto;
+    }
+    .carousel-strip img {
+      height: 96px;
+      aspect-ratio: 1;
+      object-fit: cover;
+      border-radius: 6px;
+      display: block;
+    }
+    .carousel-strip .strip-num {
+      position: absolute;
+      top: 4px;
+      left: 4px;
+      background: rgba(0,0,0,0.7);
+      color: #fff;
+      min-width: 20px;
+      height: 20px;
+      padding: 0 6px;
+      border-radius: 10px;
+      font-size: 11px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+  </style>
 </head>
 <body>
   <nav class="nav">
@@ -21,6 +112,7 @@
 
   <script>
     let hashtagSets = [];
+    const expandedIds = new Set();
 
     async function load() {
       hashtagSets = await fetch('/api/hashtag-sets').then(r => r.json());
@@ -31,11 +123,40 @@
         return;
       }
       list.innerHTML = queue.map(renderCard).join('');
+      applyExpandedState();
     }
 
     function platformBadge(platform) {
       const cls = platform === 'instagram' ? 'badge-ig' : 'badge-fb';
       return `<span class="platform-badge ${cls}">${platform}</span>`;
+    }
+
+    function renderThumb(item) {
+      // Defensive: photo_count + urls come from new server.js; fall back to legacy single
+      const count = item.photo_count || (Array.isArray(item.urls) ? item.urls.length : 1);
+      const urls = (Array.isArray(item.urls) && item.urls.length > 0) ? item.urls : [item.url];
+      const cover = urls[0];
+
+      if (count <= 1) {
+        return `<div class="thumb-wrap"><img class="cover" src="${cover}" /></div>`;
+      }
+
+      return `
+        <div class="thumb-wrap multi" onclick="toggleStrip('${item.id}')">
+          <div class="stack-bg stack-bg-2"></div>
+          <div class="stack-bg stack-bg-1"></div>
+          <img class="cover" src="${cover}" />
+          <span class="count-badge">1/${count} <span class="chevron">▾</span></span>
+        </div>
+        <div class="carousel-strip" id="strip-${item.id}">
+          ${urls.map((u, i) => `
+            <div class="strip-item">
+              <img src="${u}" />
+              <span class="strip-num">${i + 1}</span>
+            </div>
+          `).join('')}
+        </div>
+      `;
     }
 
     function renderCard(item) {
@@ -52,7 +173,7 @@
             ${platformBadge(item.platform)}
             <span class="status ${item.status}">${item.status}</span>
           </div>
-          <img src="${item.url}" style="width:100%;border-radius:8px;display:block;margin-bottom:10px;" />
+          ${renderThumb(item)}
           ${item.error ? `<div class="muted" style="color:#e08d8d;margin-bottom:8px;">${escapeHtml(item.error.slice(0, 120))}</div>` : ''}
           <label>Caption</label>
           <textarea onblur="updateField('${item.id}', 'caption', this.value)">${escapeHtml(item.caption)}</textarea>
@@ -66,6 +187,28 @@
           </div>
         </div>
       `;
+    }
+
+    function toggleStrip(id) {
+      if (expandedIds.has(id)) expandedIds.delete(id);
+      else expandedIds.add(id);
+      applyExpandedState();
+    }
+
+    function applyExpandedState() {
+      document.querySelectorAll('.thumb-wrap.multi').forEach(wrap => {
+        const card = wrap.closest('.card');
+        const id = card?.dataset.id;
+        const strip = document.getElementById('strip-' + id);
+        const open = expandedIds.has(id);
+        if (open) {
+          wrap.classList.add('expanded');
+          if (strip) strip.classList.add('open');
+        } else {
+          wrap.classList.remove('expanded');
+          if (strip) strip.classList.remove('open');
+        }
+      });
     }
 
     async function updateField(id, field, value) {
@@ -87,6 +230,7 @@
     async function del(id) {
       if (!confirm('Delete this post from the queue?')) return;
       await fetch('/api/queue/' + id, { method: 'DELETE' });
+      expandedIds.delete(id);
       load();
     }
 
