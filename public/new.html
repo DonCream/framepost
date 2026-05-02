@@ -2,144 +2,403 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
   <title>FramePost — New Post</title>
   <link rel="stylesheet" href="/style.css" />
+  <style>
+    .lib-grid img.selected {
+      outline: 3px solid var(--accent);
+      outline-offset: 2px;
+    }
+    .lib-grid .thumb { position: relative; }
+    .lib-grid .order-badge {
+      position: absolute;
+      top: 4px;
+      left: 4px;
+      width: 22px;
+      height: 22px;
+      background: var(--accent);
+      color: #000;
+      font-weight: 700;
+      font-size: 13px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      pointer-events: none;
+    }
+    .lib-grid img.disabled {
+      opacity: 0.3;
+      cursor: not-allowed;
+    }
+    .selected-strip {
+      display: flex;
+      gap: 6px;
+      overflow-x: auto;
+      padding: 8px 0;
+      margin-bottom: 12px;
+      min-height: 88px;
+      align-items: center;
+    }
+    .selected-strip img {
+      height: 80px;
+      aspect-ratio: 1;
+      object-fit: cover;
+      border-radius: 6px;
+      flex: 0 0 auto;
+    }
+    .selected-strip .empty-hint {
+      color: var(--muted);
+      font-size: 13px;
+      padding: 8px 12px;
+    }
+    .toolbar {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 8px;
+      flex-wrap: wrap;
+    }
+    .toolbar .count {
+      font-size: 14px;
+      color: var(--muted);
+    }
+    .toolbar .platform-lock {
+      font-size: 12px;
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-weight: 600;
+    }
+    .toolbar .platform-lock.ig { background: #3a1f3a; color: #e08dd0; }
+    .toolbar .platform-lock.fb { background: #1f3a5f; color: #aac4ee; }
+    button.ghost {
+      background: transparent;
+      border: 1px solid #444;
+      color: var(--muted);
+    }
+    .actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 12px;
+      flex-wrap: wrap;
+    }
+    .actions button {
+      flex: 1;
+      min-width: 120px;
+    }
+    textarea {
+      width: 100%;
+      min-height: 110px;
+      box-sizing: border-box;
+      background: #1a1a1a;
+      color: var(--fg);
+      border: 1px solid #333;
+      border-radius: 6px;
+      padding: 10px;
+      font-family: inherit;
+      font-size: 15px;
+    }
+    .hashtag-toggles {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin: 8px 0;
+    }
+    .hashtag-toggles label {
+      background: #1a1a1a;
+      border: 1px solid #333;
+      padding: 4px 10px;
+      border-radius: 12px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .hashtag-toggles input { margin-right: 4px; }
+    .schedule-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin: 8px 0;
+    }
+    .schedule-row input[type="datetime-local"] {
+      flex: 1;
+      background: #1a1a1a;
+      color: var(--fg);
+      border: 1px solid #333;
+      border-radius: 6px;
+      padding: 8px;
+      font-size: 16px;
+    }
+  </style>
 </head>
 <body>
-  <nav class="nav">
-    <span class="brand">FramePost</span>
-    <a href="/queue">Queue</a>
-    <a href="/new" class="active">New</a>
-    <a href="/settings">Settings</a>
-  </nav>
+<nav class="topnav">
+  <a href="/queue">Queue</a>
+  <a href="/new" class="active">New</a>
+  <a href="/settings">Settings</a>
+</nav>
 
-  <div class="container">
-    <h1>New Post</h1>
+<main>
+  <h1>New Post</h1>
 
-    <h2>1. Pick a photo</h2>
-    <div id="library" class="lib-grid"><div class="empty">Loading…</div></div>
-
-    <div id="builder" style="display:none;">
-      <h2>2. Selected photo</h2>
-      <div style="margin-bottom:8px;" id="selected-platform"></div>
-      <img id="preview" style="width:100%;border-radius:8px;" />
-
-      <h2>3. Caption</h2>
-      <textarea id="caption" placeholder="Caption goes here…"></textarea>
-      <div class="btn-row">
-        <button class="btn-secondary" onclick="generate()">↻ Generate with AI</button>
-      </div>
-
-      <h2>4. Hashtag sets</h2>
-      <div id="hashtag-sets"></div>
-
-      <h2>5. Publish</h2>
-      <label>Schedule for</label>
-      <select id="when">
-        <option value="now">Post Now</option>
-        <option value="schedule">Schedule for…</option>
-      </select>
-      <input type="datetime-local" id="schedule-at" style="display:none;margin-top:8px;" />
-      <div class="btn-row">
-        <button class="btn-success" onclick="submit()">Submit</button>
-      </div>
-    </div>
+  <h2>1. Select photos (1–10)</h2>
+  <div class="toolbar">
+    <span class="count" id="count">0 selected</span>
+    <span id="platformLock" class="platform-lock" style="display:none"></span>
+    <button class="ghost" id="clearBtn" type="button">Clear</button>
   </div>
 
-  <script>
-    let library = [], hashtagSets = [], selected = null, activeSets = new Set();
+  <div class="selected-strip" id="selectedStrip">
+    <span class="empty-hint">Tap photos below. Selection order = post order.</span>
+  </div>
 
-    async function load() {
-      [library, hashtagSets] = await Promise.all([
-        fetch('/api/library').then(r => r.json()),
-        fetch('/api/hashtag-sets').then(r => r.json()),
-      ]);
+  <div class="lib-grid" id="grid"></div>
 
-      hashtagSets.forEach(s => { if (s.enabled_by_default) activeSets.add(s.id); });
+  <h2>2. Caption</h2>
+  <button id="genBtn" type="button">Generate caption</button>
+  <textarea id="caption" placeholder="Caption will appear here. You can edit it."></textarea>
 
-      const lib = document.getElementById('library');
-      if (library.length === 0) {
-        lib.innerHTML = '<div class="empty">No unposted photos found in Cloudinary.</div>';
-        return;
-      }
-      lib.innerHTML = library.map((item, i) => {
-        const ringClass = item.platform === 'instagram' ? 'ring-ig' : 'ring-fb';
-        return `<img src="${item.url}" data-i="${i}" class="${ringClass}" onclick="select(${i}, this)" title="${item.platform}" />`;
-      }).join('');
+  <h2>3. Hashtag sets</h2>
+  <div class="hashtag-toggles" id="hashtags"></div>
+
+  <h2>4. Schedule</h2>
+  <div class="schedule-row">
+    <input type="datetime-local" id="scheduledAt" />
+  </div>
+
+  <div class="actions">
+    <button id="queueBtn" type="button">Add to Queue</button>
+    <button id="postNowBtn" type="button">Post Now</button>
+  </div>
+</main>
+
+<script>
+const state = {
+  photos: [],
+  selected: [],
+  selectedById: {},
+  platform: null,
+  hashtagSets: [],
+};
+
+const $ = (id) => document.getElementById(id);
+
+async function loadLibrary() {
+  const res = await fetch('/api/library?limit=120');
+  const data = await res.json();
+  state.photos = Array.isArray(data) ? data : (data.photos || []);
+  renderAll();
+}
+
+async function loadHashtagSets() {
+  const res = await fetch('/api/hashtag-sets');
+  const data = await res.json();
+  state.hashtagSets = Array.isArray(data) ? data : (data.sets || []);
+  renderHashtags();
+}
+
+function renderGrid() {
+  const grid = $('grid');
+  grid.innerHTML = '';
+  for (const p of state.photos) {
+    const wrap = document.createElement('div');
+    wrap.className = 'thumb';
+    const img = document.createElement('img');
+    img.src = p.url;
+    img.alt = p.public_id;
+    img.dataset.publicId = p.public_id;
+    img.classList.add(p.platform === 'instagram' ? 'ring-ig' : 'ring-fb');
+
+    const idx = state.selected.indexOf(p.public_id);
+    if (idx >= 0) {
+      img.classList.add('selected');
+      const badge = document.createElement('span');
+      badge.className = 'order-badge';
+      badge.textContent = idx + 1;
+      wrap.appendChild(badge);
+    } else if (state.platform && p.platform !== state.platform) {
+      img.classList.add('disabled');
+    } else if (state.selected.length >= 10) {
+      img.classList.add('disabled');
     }
 
-    function select(i, el) {
-      selected = library[i];
-      document.querySelectorAll('#library img').forEach(x => x.classList.remove('selected'));
-      el.classList.add('selected');
-      document.getElementById('preview').src = selected.url;
-      const cls = selected.platform === 'instagram' ? 'badge-ig' : 'badge-fb';
-      document.getElementById('selected-platform').innerHTML =
-        `<span class="platform-badge ${cls}">${selected.platform}</span>`;
-      document.getElementById('builder').style.display = 'block';
-      renderTags();
-    }
+    img.addEventListener('click', () => togglePhoto(p));
+    wrap.appendChild(img);
+    grid.appendChild(wrap);
+  }
+}
 
-    function renderTags() {
-      document.getElementById('hashtag-sets').innerHTML = hashtagSets.map(s => {
-        const active = activeSets.has(s.id) ? 'active' : '';
-        return `<span class="tag-pill ${active}" onclick="toggle('${s.id}', this)">${s.name}</span>`;
-      }).join('');
-    }
+function togglePhoto(p) {
+  const idx = state.selected.indexOf(p.public_id);
+  if (idx >= 0) {
+    state.selected.splice(idx, 1);
+    delete state.selectedById[p.public_id];
+    if (state.selected.length === 0) state.platform = null;
+  } else {
+    if (state.platform && p.platform !== state.platform) return;
+    if (state.selected.length >= 10) return;
+    state.selected.push(p.public_id);
+    state.selectedById[p.public_id] = p;
+    state.platform = p.platform;
+  }
+  renderAll();
+}
 
-    function toggle(id, el) {
-      if (activeSets.has(id)) activeSets.delete(id);
-      else activeSets.add(id);
-      el.classList.toggle('active');
-    }
+function renderSelectedStrip() {
+  const strip = $('selectedStrip');
+  strip.innerHTML = '';
+  if (state.selected.length === 0) {
+    const hint = document.createElement('span');
+    hint.className = 'empty-hint';
+    hint.textContent = 'Tap photos below. Selection order = post order.';
+    strip.appendChild(hint);
+    return;
+  }
+  for (const pid of state.selected) {
+    const p = state.selectedById[pid];
+    const img = document.createElement('img');
+    img.src = p.url;
+    strip.appendChild(img);
+  }
+}
 
-    async function generate() {
-      if (!selected) return;
-      const ta = document.getElementById('caption');
-      ta.value = 'Generating…';
-      const result = await fetch('/api/caption', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ imageUrl: selected.url })
-      }).then(r => r.json());
-      ta.value = result.caption || '(failed)';
-    }
+function renderToolbar() {
+  $('count').textContent = `${state.selected.length} selected`;
+  const lock = $('platformLock');
+  if (state.platform) {
+    lock.style.display = '';
+    lock.textContent = state.platform === 'instagram' ? 'INSTAGRAM' : 'FACEBOOK';
+    lock.className = 'platform-lock ' + (state.platform === 'instagram' ? 'ig' : 'fb');
+  } else {
+    lock.style.display = 'none';
+  }
+}
 
-    document.getElementById('when').addEventListener('change', e => {
-      document.getElementById('schedule-at').style.display = e.target.value === 'schedule' ? 'block' : 'none';
+function renderHashtags() {
+  const wrap = $('hashtags');
+  wrap.innerHTML = '';
+  for (const s of state.hashtagSets) {
+    const label = document.createElement('label');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.value = s.id;
+    if (s.enabled_by_default) cb.checked = true;
+    label.appendChild(cb);
+    label.appendChild(document.createTextNode(' ' + s.name));
+    wrap.appendChild(label);
+  }
+}
+
+function renderAll() {
+  renderGrid();
+  renderSelectedStrip();
+  renderToolbar();
+}
+
+function clearSelection() {
+  state.selected = [];
+  state.selectedById = {};
+  state.platform = null;
+  $('caption').value = '';
+  renderAll();
+}
+
+async function generateCaption() {
+  if (state.selected.length === 0) {
+    alert('Pick at least one photo first.');
+    return;
+  }
+  const btn = $('genBtn');
+  btn.disabled = true;
+  btn.textContent = 'Generating...';
+  try {
+    const res = await fetch('/api/caption', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ public_ids: state.selected }),
     });
+    const data = await res.json();
+    if (data.error) {
+      alert('Caption error: ' + data.error);
+    } else {
+      $('caption').value = data.caption || '';
+    }
+  } catch (e) {
+    alert('Network error: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Generate caption';
+  }
+}
 
-    async function submit() {
-      if (!selected) return alert('Pick a photo first.');
-      const caption = document.getElementById('caption').value.trim();
-      if (!caption) return alert('Caption is empty.');
+function getSelectedHashtagSetIds() {
+  return [...document.querySelectorAll('#hashtags input:checked')].map((el) => el.value);
+}
 
-      const whenSel = document.getElementById('when').value;
-      let when = 'now';
-      if (whenSel === 'schedule') {
-        const dt = document.getElementById('schedule-at').value;
-        if (!dt) return alert('Pick a date/time.');
-        when = new Date(dt).toISOString();
-      }
+async function submitPost(action) {
+  if (state.selected.length === 0) {
+    alert('Pick at least one photo.');
+    return;
+  }
+  const caption = $('caption').value.trim();
+  if (!caption) {
+    alert('Caption is empty.');
+    return;
+  }
+  const scheduled_at = $('scheduledAt').value || null;
+  if (action === 'queue' && !scheduled_at) {
+    alert('Pick a scheduled time, or use Post Now.');
+    return;
+  }
 
-      await fetch('/api/post', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-          public_id: selected.public_id,
-          url: selected.url,
-          platform: selected.platform,
-          caption,
-          hashtag_sets: Array.from(activeSets),
-          when,
-        })
-      });
+  const body = {
+    public_ids: state.selected,
+    caption,
+    hashtag_sets: getSelectedHashtagSetIds(),
+    action,
+  };
+  if (action === 'queue') body.scheduled_at = new Date(scheduled_at).toISOString();
 
+  const btn = action === 'queue' ? $('queueBtn') : $('postNowBtn');
+  btn.disabled = true;
+  const oldText = btn.textContent;
+  btn.textContent = action === 'queue' ? 'Queuing...' : 'Posting...';
+  try {
+    const res = await fetch('/api/post', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (data.error) {
+      alert('Error: ' + data.error);
+    } else {
+      alert(action === 'queue' ? 'Added to queue.' : 'Posting now — check the queue for status.');
       window.location.href = '/queue';
     }
+  } catch (e) {
+    alert('Network error: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = oldText;
+  }
+}
 
-    load();
-  </script>
+document.addEventListener('DOMContentLoaded', () => {
+  // sensible default schedule: tomorrow 10:00 local
+  const d = new Date();
+  d.setDate(d.getDate() + 1);
+  d.setHours(10, 0, 0, 0);
+  const pad = (n) => String(n).padStart(2, '0');
+  $('scheduledAt').value = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+
+  $('clearBtn').addEventListener('click', clearSelection);
+  $('genBtn').addEventListener('click', generateCaption);
+  $('queueBtn').addEventListener('click', () => submitPost('queue'));
+  $('postNowBtn').addEventListener('click', () => submitPost('post_now'));
+
+  loadLibrary();
+  loadHashtagSets();
+});
+</script>
 </body>
 </html>

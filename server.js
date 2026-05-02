@@ -10,6 +10,7 @@ const cloud = require('./cloudinary');
 const ai = require('./ai');
 const meta = require('./meta');
 const email = require('./email');
+const { normalizePhotos, validateSelection } = require('./post-helpers');
 
 const nanoid = customAlphabet('0123456789abcdefghijklmnopqrstuvwxyz', 12);
 const app = express();
@@ -40,7 +41,37 @@ function defaultHashtagSetIds() {
   return db.prepare('SELECT id FROM hashtag_sets WHERE enabled_by_default = 1').all().map((r) => r.id);
 }
 
-// ---------- Auto-fill job ----------
+// ---------- Selection resolver (used by /api/caption and /api/post) ----------
+// Accepts either single (public_id/url) or array (public_ids/urls) shapes.
+// Resolves URLs and platform from Cloudinary, validates same-platform, returns normalized selection.
+async function resolveSelection(body) {
+  let public_ids = body.public_ids;
+  if (!public_ids && body.public_id) public_ids = [body.public_id];
+  if (!Array.isArray(public_ids) || public_ids.length === 0) {
+    throw new Error('public_ids required');
+  }
+  if (public_ids.length > 10) {
+    throw new Error('max 10 photos per post (Instagram limit)');
+  }
+
+  // Always resolve via Cloudinary so we have URLs + platform + can validate
+  const lib = await cloud.listPhotos({ limit: 500, includePosted: true });
+  const byId = Object.fromEntries(lib.map((p) => [p.public_id, p]));
+  const photos = public_ids.map((id) => byId[id]).filter(Boolean);
+  if (photos.length !== public_ids.length) {
+    throw new Error('one or more photos not found in Cloudinary');
+  }
+  const v = validateSelection(photos);
+  if (!v.ok) throw new Error(v.error);
+
+  return {
+    public_ids,
+    urls: photos.map((p) => p.url),
+    platform: v.platform,
+  };
+}
+
+// ---------- Auto-fill job (unchanged: still single-photo only) ----------
 async function runAutofill() {
   const perDay = parseInt(getSetting('autofill_per_day') || '1', 10);
   console.log(`[autofill] running, target=${perDay}`);
@@ -88,7 +119,7 @@ async function runAutofill() {
   }
 }
 
-// ---------- Publish job ----------
+// ---------- Publish job (now carousel-aware) ----------
 async function publishFromQueue() {
   const now = new Date().toISOString();
   const next = db.prepare(
@@ -100,24 +131,28 @@ async function publishFromQueue() {
     return;
   }
 
-  console.log(`[publish] publishing ${next.id} to ${next.platform}`);
+  const { public_ids, urls } = normalizePhotos(next);
+  console.log(`[publish] publishing ${next.id} to ${next.platform} (${urls.length} photo${urls.length > 1 ? 's' : ''})`);
+
   const setIds = JSON.parse(next.hashtag_sets || '[]');
   const tagString = buildHashtagString(setIds);
   const fullCaption = tagString ? `${next.caption}\n\n${tagString}` : next.caption;
 
   try {
-    const result = await meta.publish({
-      url: next.url,
-      caption: fullCaption,
+    const postedId = await meta.publish({
       platform: next.platform,
+      urls,
+      caption: fullCaption,
     });
 
     db.prepare(`UPDATE queue SET status = 'posted', posted_at = datetime('now') WHERE id = ?`).run(next.id);
-    try { await cloud.tagAsPosted(next.public_id); } catch (e) { console.warn('tag posted failed:', e.message); }
+    for (const pid of public_ids) {
+      try { await cloud.tagAsPosted(pid); } catch (e) { console.warn(`tag posted failed for ${pid}:`, e.message); }
+    }
 
     db.prepare(`INSERT INTO post_log (queue_id, platform, success, message) VALUES (?, ?, ?, ?)`)
-      .run(next.id, next.platform, 1, result.id);
-    console.log(`[publish] success: ${result.id}`);
+      .run(next.id, next.platform, 1, postedId);
+    console.log(`[publish] success: ${postedId}`);
   } catch (err) {
     const message = err.response?.data ? JSON.stringify(err.response.data) : err.message;
     db.prepare(`UPDATE queue SET status = 'failed', error = ? WHERE id = ?`).run(message, next.id);
@@ -130,7 +165,16 @@ async function publishFromQueue() {
 // ---------- API: queue ----------
 app.get('/api/queue', (req, res) => {
   const rows = db.prepare(`SELECT * FROM queue ORDER BY scheduled_at ASC`).all();
-  res.json(rows.map((r) => ({ ...r, hashtag_sets: JSON.parse(r.hashtag_sets || '[]') })));
+  res.json(rows.map((r) => {
+    const { public_ids, urls } = normalizePhotos(r);
+    return {
+      ...r,
+      hashtag_sets: JSON.parse(r.hashtag_sets || '[]'),
+      public_ids,
+      urls,
+      photo_count: public_ids.length,
+    };
+  }));
 });
 
 app.patch('/api/queue/:id', (req, res) => {
@@ -191,38 +235,91 @@ app.post('/api/settings', (req, res) => {
 // ---------- API: Cloudinary library (for /new) ----------
 app.get('/api/library', async (req, res) => {
   try {
-    const items = await cloud.listPhotos({ limit: 50 });
+    const limit = parseInt(req.query.limit, 10) || 50;
+    const items = await cloud.listPhotos({ limit });
     res.json(items);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ---------- API: generate caption ----------
+// ---------- API: generate caption (single OR carousel) ----------
+// Accepts:
+//   { imageUrl, guidance }                 -- legacy single
+//   { imageUrls: [...], guidance }         -- direct array of URLs
+//   { public_ids: [...], guidance }        -- resolves via Cloudinary
 app.post('/api/caption', async (req, res) => {
-  const { imageUrl, guidance } = req.body;
+  const { imageUrl, imageUrls, public_ids, guidance } = req.body;
   try {
-    const result = await ai.generateCaption(imageUrl, guidance);
+    let urls;
+    if (Array.isArray(imageUrls) && imageUrls.length > 0) {
+      urls = imageUrls;
+    } else if (Array.isArray(public_ids) && public_ids.length > 0) {
+      const sel = await resolveSelection({ public_ids });
+      urls = sel.urls;
+    } else if (imageUrl) {
+      urls = [imageUrl];
+    } else {
+      return res.status(400).json({ error: 'imageUrl, imageUrls, or public_ids required' });
+    }
+    const result = await ai.generateCaption(urls, guidance || '');
     res.json(result);
   } catch (err) {
+    console.error('[/api/caption]', err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// ---------- API: create on-the-fly post ----------
+// ---------- API: create on-the-fly post (single OR carousel) ----------
+// Accepts (all back-compat):
+//   public_id OR public_ids: [...]
+//   caption
+//   hashtag_sets OR hashtag_set_ids: [...]
+//   when ('now' | ISO timestamp) OR scheduled_at (ISO) OR action ('queue'|'post_now')
 app.post('/api/post', async (req, res) => {
-  const { public_id, url, platform, caption, hashtag_sets, when } = req.body;
-  const id = nanoid();
-  const scheduled_at = when === 'now' ? new Date().toISOString() : when;
-  db.prepare(`INSERT INTO queue (id, public_id, url, platform, caption, hashtag_sets, scheduled_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
-    id, public_id, url, platform, caption, JSON.stringify(hashtag_sets || []), scheduled_at
-  );
-  if (when === 'now') publishFromQueue().catch((e) => console.error(e));
-  res.json({ ok: true, id });
+  try {
+    const sel = await resolveSelection(req.body);
+
+    const caption = (req.body.caption || '').trim();
+    if (!caption) return res.status(400).json({ error: 'caption required' });
+
+    const hashtagSetIds = req.body.hashtag_sets || req.body.hashtag_set_ids || [];
+
+    // Figure out scheduling
+    let postNow = false;
+    let scheduled_at;
+    if (req.body.action === 'post_now' || req.body.when === 'now') {
+      postNow = true;
+      scheduled_at = new Date().toISOString();
+    } else {
+      scheduled_at = req.body.scheduled_at || req.body.when;
+      if (!scheduled_at) return res.status(400).json({ error: 'scheduled_at required (or use action=post_now)' });
+    }
+
+    const id = nanoid();
+    db.prepare(`INSERT INTO queue
+      (id, public_id, url, public_ids, urls, platform, caption, hashtag_sets, scheduled_at, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued')`).run(
+      id,
+      sel.public_ids[0],
+      sel.urls[0],
+      JSON.stringify(sel.public_ids),
+      JSON.stringify(sel.urls),
+      sel.platform,
+      caption,
+      JSON.stringify(hashtagSetIds),
+      scheduled_at
+    );
+
+    if (postNow) publishFromQueue().catch((e) => console.error(e));
+    res.json({ ok: true, id, photo_count: sel.public_ids.length });
+  } catch (err) {
+    console.error('[/api/post]', err);
+    res.status(400).json({ error: err.message });
+  }
 });
 
-// ---------- Email button endpoints ----------
+// ---------- Email button endpoints (autofill is single-photo only) ----------
 app.get('/review/:token/approve', (req, res) => {
   const r = db.prepare('SELECT * FROM pending_review WHERE token = ?').get(req.params.token);
   if (!r) return res.status(404).send('Not found or already used');
@@ -230,9 +327,12 @@ app.get('/review/:token/approve', (req, res) => {
   const when = new Date();
   when.setDate(when.getDate() + 1);
   when.setHours(10, 0, 0, 0);
-  db.prepare(`INSERT INTO queue (id, public_id, url, platform, caption, hashtag_sets, scheduled_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
-    id, r.public_id, r.url, r.platform, r.caption, r.hashtag_sets, when.toISOString()
+  db.prepare(`INSERT INTO queue
+    (id, public_id, url, public_ids, urls, platform, caption, hashtag_sets, scheduled_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    id, r.public_id, r.url,
+    JSON.stringify([r.public_id]), JSON.stringify([r.url]),
+    r.platform, r.caption, r.hashtag_sets, when.toISOString()
   );
   db.prepare('DELETE FROM pending_review WHERE token = ?').run(req.params.token);
   res.send(simplePage('✓ Added to queue', `<p>Scheduled for ${when.toLocaleString()}</p><p><a href="/queue">View queue</a></p>`));
@@ -257,9 +357,12 @@ app.get('/review/:token/postnow', async (req, res) => {
   const r = db.prepare('SELECT * FROM pending_review WHERE token = ?').get(req.params.token);
   if (!r) return res.status(404).send('Not found or already used');
   const id = nanoid();
-  db.prepare(`INSERT INTO queue (id, public_id, url, platform, caption, hashtag_sets, scheduled_at)
-    VALUES (?, ?, ?, ?, ?, ?, datetime('now'))`).run(
-    id, r.public_id, r.url, r.platform, r.caption, r.hashtag_sets
+  db.prepare(`INSERT INTO queue
+    (id, public_id, url, public_ids, urls, platform, caption, hashtag_sets, scheduled_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`).run(
+    id, r.public_id, r.url,
+    JSON.stringify([r.public_id]), JSON.stringify([r.url]),
+    r.platform, r.caption, r.hashtag_sets
   );
   db.prepare('DELETE FROM pending_review WHERE token = ?').run(req.params.token);
   publishFromQueue().catch((e) => console.error(e));
