@@ -270,6 +270,89 @@ app.post('/api/caption', async (req, res) => {
   }
 });
 
+// ---------- API: client intake brief (called from public intake form) ----------
+const BRIEF_ALLOWED_ORIGINS = new Set([
+  'https://webjellystudios.com',
+  'https://www.webjellystudios.com',
+  'https://webjelly.net',
+  // add your Framer published domain here, e.g. 'https://your-site.framer.app'
+]);
+
+// dead-simple per-IP rate limit (10 req / 10 min)
+const briefHits = new Map();
+function briefRateLimit(ip) {
+  const now = Date.now();
+  const windowMs = 10 * 60 * 1000;
+  const hits = (briefHits.get(ip) || []).filter((t) => now - t < windowMs);
+  hits.push(now);
+  briefHits.set(ip, hits);
+  return hits.length <= 10;
+}
+
+function briefCors(req, res) {
+  const origin = req.headers.origin;
+  if (origin && BRIEF_ALLOWED_ORIGINS.has(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    return true;
+  }
+  return false;
+}
+
+app.options('/api/brief', (req, res) => {
+  if (!briefCors(req, res)) return res.status(403).end();
+  res.status(204).end();
+});
+
+app.post('/api/brief', async (req, res) => {
+  if (!briefCors(req, res)) return res.status(403).json({ error: 'origin not allowed' });
+
+  const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip;
+  if (!briefRateLimit(ip)) return res.status(429).json({ error: 'rate limited' });
+
+  const { formData } = req.body || {};
+  if (!formData || typeof formData !== 'object') {
+    return res.status(400).json({ error: 'formData required' });
+  }
+
+  // safety cap so a giant payload can't burn tokens
+  const payload = JSON.stringify(formData).slice(0, 12000);
+
+  try {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-5',
+        max_tokens: 1500,
+        messages: [{
+          role: 'user',
+          content: `You are a senior web designer at WebJelly Studios. A new client just submitted the intake form below. Produce a clear, structured project brief in Markdown covering: project summary, audience, design direction, scope, suggested timeline, and recommended next steps.\n\nFORM DATA:\n${payload}`,
+        }],
+      }),
+    });
+
+    if (!r.ok) {
+      const text = await r.text();
+      console.error('[/api/brief] anthropic error:', r.status, text);
+      return res.status(502).json({ error: 'upstream error' });
+    }
+
+    const data = await r.json();
+    const brief = data.content?.map((b) => b.text || '').join('\n').trim();
+    res.json({ brief });
+  } catch (err) {
+    console.error('[/api/brief]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ---------- API: create on-the-fly post (single OR carousel) ----------
 // Accepts (all back-compat):
 //   public_id OR public_ids: [...]
